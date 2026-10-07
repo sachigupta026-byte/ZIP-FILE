@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>PDF ZIP Splitter + Duplicate Remover</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f4f6f8;
+  color: #17202a;
+}
+
+.container {
+  max-width: 800px;
+  margin: 40px auto;
+  padding: 20px;
+}
+
+.card {
+  background: white;
+  border-radius: 18px;
+  padding: 30px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.08);
+}
+
+h1 {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  color: #667085;
+  margin-bottom: 25px;
+}
+
+label {
+  display: block;
+  font-weight: bold;
+  margin: 18px 0 8px;
+}
+
+input[type="file"] {
+  width: 100%;
+  padding: 14px;
+  border: 1px dashed #98a2b3;
+  border-radius: 10px;
+  background: #fafafa;
+}
+
+button {
+  width: 100%;
+  margin-top: 22px;
+  padding: 15px;
+  border: 0;
+  border-radius: 10px;
+  background: #111827;
+  color: white;
+  font-size: 16px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+progress {
+  width: 100%;
+  height: 18px;
+  margin-top: 20px;
+}
+
+.status {
+  margin-top: 20px;
+  padding: 15px;
+  border-radius: 10px;
+  background: #f2f4f7;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.info {
+  margin-top: 15px;
+  font-size: 13px;
+  color: #667085;
+  line-height: 1.6;
+}
+
+.success {
+  color: #087443;
+}
+
+.error {
+  color: #b42318;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<h1>PDF ZIP Splitter</h1>
+
+<div class="subtitle">
+Remove duplicate PDFs and create ZIP files containing 1,500 unique PDFs each.
+</div>
+
+
+<label for="zipFile">
+Select your large ZIP file
+</label>
+
+<input
+  id="zipFile"
+  type="file"
+  accept=".zip,application/zip"
+>
+
+
+<button id="startButton">
+START PROCESSING
+</button>
+
+
+<progress
+  id="progress"
+  value="0"
+  max="100"
+  hidden
+></progress>
+
+
+<div id="status" class="status">
+Select your ZIP file.
+</div>
+
+
+<div class="info">
+
+• Duplicate detection is based on the actual PDF bytes, not filename.<br>
+• Each output ZIP contains maximum 1,500 unique PDFs.<br>
+• Original PDF contents are not modified.<br>
+• Processing happens locally in your browser.<br>
+• Chrome or Edge on desktop is recommended for very large ZIP files.
+
+</div>
+
+</div>
+
+</div>
+
+
+<!-- zip.js -->
+<script src="https://cdn.jsdelivr.net/npm/@zip.js/zip.js@2.7.57/dist/zip-full.min.js"></script>
+
+
+<script>
+
+"use strict";
+
+
+const zipInput =
+  document.getElementById("zipFile");
+
+const startButton =
+  document.getElementById("startButton");
+
+const progress =
+  document.getElementById("progress");
+
+const status =
+  document.getElementById("status");
+
+
+const PDF_PER_ZIP = 1500;
+
+
+function setStatus(message, type = "") {
+
+  status.textContent = message;
+  status.className = "status " + type;
+
+}
+
+
+function sleep(ms) {
+
+  return new Promise(resolve =>
+    setTimeout(resolve, ms)
+  );
+
+}
+
+
+/*
+  SHA-256 hash of PDF bytes.
+
+  This is used for duplicate detection.
+*/
+
+async function sha256(buffer) {
+
+  const hashBuffer =
+    await crypto.subtle.digest(
+      "SHA-256",
+      buffer
+    );
+
+  const hashArray =
+    Array.from(
+      new Uint8Array(hashBuffer)
+    );
+
+  return hashArray
+    .map(
+      byte =>
+        byte
+          .toString(16)
+          .padStart(2, "0")
+    )
+    .join("");
+
+}
+
+
+/*
+  Make a safe filename inside ZIP.
+
+  If the original filename is duplicated,
+  it is skipped before reaching this function.
+*/
+
+function cleanPdfName(name) {
+
+  let result =
+    String(name || "document.pdf")
+      .split("/")
+      .pop()
+      .split("\\")
+      .pop();
+
+  if (!result.toLowerCase().endsWith(".pdf")) {
+
+    result += ".pdf";
+
+  }
+
+  return result;
+
+}
+
+
+/*
+  File System Access API.
+
+  This allows Chrome/Edge to write
+  the output ZIP directly to disk.
+*/
+
+async function chooseOutputFile(partNumber) {
+
+  if (!window.showSaveFilePicker) {
+
+    return null;
+
+  }
+
+
+  const handle =
+    await window.showSaveFilePicker({
+
+      suggestedName:
+        "unique-pdfs-part-" +
+        String(partNumber).padStart(3, "0") +
+        ".zip",
+
+      types: [
+
+        {
+
+          description: "ZIP file",
+
+          accept: {
+
+            "application/zip": [
+              ".zip"
+            ]
+
+          }
+
+        }
+
+      ]
+
+    });
+
+
+  return handle;
+
+}
+
+
+/*
+  Process everything.
+*/
+
+startButton.addEventListener(
+  "click",
+  async function () {
+
+    const file =
+      zipInput.files[0];
+
+
+    if (!file) {
+
+      setStatus(
+        "Please select a ZIP file first.",
+        "error"
+      );
+
+      return;
+
+    }
+
+
+    if (
+      !file.name
+        .toLowerCase()
+        .endsWith(".zip")
+    ) {
+
+      setStatus(
+        "Please select a ZIP file.",
+        "error"
+      );
+
+      return;
+
+    }
+
+
+    startButton.disabled = true;
+
+    progress.hidden = false;
+
+    progress.value = 0;
+
+
+    let reader = null;
+
+    let currentWriter = null;
+
+    let currentZipWriter = null;
+
+    let currentPart = 0;
+
+    let currentPartCount = 0;
+
+    let totalPdfEntries = 0;
+
+    let uniquePdfCount = 0;
+
+    let duplicateCount = 0;
+
+    let skippedNonPdf = 0;
+
+
+    /*
+      SHA hashes of PDFs already seen.
+
+      This is what prevents duplicates.
+    */
+
+    const seenHashes =
+      new Set();
+
+
+    /*
+      Used only if browser does not
+      support direct disk writing.
+    */
+
+    let fallbackBlobs = [];
+
+
+    try {
+
+      setStatus(
+        "Opening ZIP...\n" +
+        file.name +
+        "\n" +
+        "Size: " +
+        (
+          file.size /
+          1024 /
+          1024
+        ).toFixed(2) +
+        " MB"
+      );
+
+
+      /*
+        Open input ZIP.
+      */
+
+      reader =
+        new zip.ZipReader(
+          new zip.BlobReader(file)
+        );
+
+
+      const entries =
+        await reader.getEntries();
+
+
+      /*
+        Count PDF entries.
+      */
+
+      const pdfEntries =
+        entries.filter(
+          entry =>
+            !entry.directory &&
+            entry.filename
+              .toLowerCase()
+              .endsWith(".pdf")
+        );
+
+
+      totalPdfEntries =
+        pdfEntries.length;
+
+
+      if (!totalPdfEntries) {
+
+        throw new Error(
+          "No PDF files were found inside the ZIP."
+        );
+
+      }
+
+
+      skippedNonPdf =
+        entries.length -
+        pdfEntries.length;
+
+
+      setStatus(
+        "ZIP opened.\n\n" +
+
+        "PDF files found: " +
+        totalPdfEntries.toLocaleString() +
+
+        "\nNon-PDF entries: " +
+        skippedNonPdf.toLocaleString() +
+
+        "\n\nStarting duplicate check..."
+      );
+
+
+      /*
+        Helper:
+        create next output ZIP.
+      */
+
+      async function startNextPart() {
+
+        currentPart++;
+
+        currentPartCount = 0;
+
+
+        /*
+          First try direct disk saving.
+        */
+
+        if (window.showSaveFilePicker) {
+
+          const fileHandle =
+            await chooseOutputFile(
+              currentPart
+            );
+
+
+          const writable =
+            await fileHandle.createWritable();
+
+
+          currentWriter =
+            writable;
+
+
+          currentZipWriter =
+            new zip.ZipWriter(
+              new zip.WritableStreamWriter(
+                writable
+              )
+            );
+
+
+        }
+
+        else {
+
+          /*
+            Fallback:
+            keep current ZIP in memory.
+          */
+
+          currentWriter = null;
+
+          currentZipWriter =
+            new zip.ZipWriter(
+              new zip.BlobWriter(
+                "application/zip"
+              )
+            );
+
+        }
+
+
+        setStatus(
+          "Creating output ZIP " +
+          currentPart +
+          "...\n\n" +
+
+          "Unique PDFs: " +
+          uniquePdfCount.toLocaleString() +
+
+          "\nDuplicates removed: " +
+          duplicateCount.toLocaleString()
+        );
+
+      }
+
+
+      /*
+        Start first ZIP.
+      */
+
+      await startNextPart();
+
+
+      /*
+        Process every PDF.
+      */
+
+      for (
+        let i = 0;
+        i < pdfEntries.length;
+        i++
+      ) {
+
+
+        const entry =
+          pdfEntries[i];
+
+
+        /*
+          Get PDF as Blob.
+
+          Only one PDF is loaded at a time.
+        */
+
+        const pdfBlob =
+          await entry.getData(
+            new zip.BlobWriter(
+              "application/pdf"
+            )
+          );
+
+
+        /*
+          Read bytes for SHA-256.
+        */
+
+        const buffer =
+          await pdfBlob.arrayBuffer();
+
+
+        const hash =
+          await sha256(buffer);
+
+
+        /*
+          Duplicate?
+        */
+
+        if (seenHashes.has(hash)) {
+
+          duplicateCount++;
+
+
+          /*
+            Release references.
+          */
+
+          continue;
+
+        }
+
+
+        /*
+          New unique PDF.
+        */
+
+        seenHashes.add(hash);
+
+        uniquePdfCount++;
+
+
+        /*
+          Start a new ZIP when
+          current ZIP already has 1500.
+        */
+
+        if (
+          currentPartCount >=
+          PDF_PER_ZIP
+        ) {
+
+          /*
+            Close previous ZIP.
+          */
+
+          await currentZipWriter.close();
+
+
+          if (currentWriter) {
+
+            /*
+              File System Access API
+              writable stream must be closed.
+            */
+
+            await currentWriter.close();
+
+          }
+
+
+          currentWriter = null;
+
+          currentZipWriter = null;
+
+
+          /*
+            Start next ZIP.
+          */
+
+          await startNextPart();
+
+        }
+
+
+        /*
+          Preserve the original PDF bytes.
+        */
+
+        const filename =
+          cleanPdfName(
+            entry.filename
+          );
+
+
+        /*
+          Avoid duplicate filenames inside
+          the same output ZIP.
+
+          Same content was already removed
+          using hash, but two different PDFs
+          can still have the same filename.
+        */
+
+        let finalName =
+          filename;
+
+
+        /*
+          If filename collision occurs,
+          add a unique suffix.
+        */
+
+        let suffix = 1;
+
+
+        while (true) {
+
+          try {
+
+            /*
+              zip.js allows checking by adding.
+              We maintain our own Set instead.
+            */
+
+            if (
+              !window.__zipNames
+            ) {
+
+              window.__zipNames =
+                new Map();
+
+            }
+
+
+            if (
+              !window.__zipNames
+                .has(currentPart)
+            ) {
+
+              window.__zipNames.set(
+                currentPart,
+                new Set()
+              );
+
+            }
+
+
+            const nameSet =
+              window.__zipNames
+                .get(currentPart);
+
+
+            if (
+              !nameSet.has(finalName)
+            ) {
+
+              nameSet.add(finalName);
+
+              break;
+
+            }
+
+
+            const dot =
+              filename.lastIndexOf(".");
+
+
+            finalName =
+              filename.substring(
+                0,
+                dot
+              ) +
+              "-" +
+              suffix +
+              ".pdf";
+
+
+            suffix++;
+
+          }
+
+          catch (e) {
+
+            break;
+
+          }
+
+        }
+
+
+        /*
+          Add PDF to current ZIP.
+        */
+
+        await currentZipWriter.add(
+
+          finalName,
+
+          new zip.BlobReader(
+            pdfBlob
+          ),
+
+          {
+            level: 0
+          }
+
+        );
+
+
+        currentPartCount++;
+
+
+        /*
+          Progress.
+        */
+
+        progress.value =
+          ((i + 1) /
+            pdfEntries.length) *
+          100;
+
+
+        /*
+          Update UI.
+        */
+
+        if (
+          (i + 1) % 10 === 0 ||
+          i === pdfEntries.length - 1
+        ) {
+
+          setStatus(
+
+            "Processing PDFs...\n\n" +
+
+            "Scanned: " +
+            (i + 1).toLocaleString() +
+            " / " +
+            pdfEntries.length.toLocaleString() +
+
+            "\n\n" +
+
+            "Unique PDFs: " +
+            uniquePdfCount.toLocaleString() +
+
+            "\nDuplicates removed: " +
+            duplicateCount.toLocaleString() +
+
+            "\n\nCurrent ZIP: part-" +
+            String(currentPart)
+              .padStart(3, "0") +
+
+            "\nPDFs in current ZIP: " +
+            currentPartCount +
+            " / " +
+            PDF_PER_ZIP
+
+          );
+
+
+          await sleep(0);
+
+        }
+
+      }
+
+
+      /*
+        Close final ZIP.
+      */
+
+      if (currentZipWriter) {
+
+        const result =
+          await currentZipWriter.close();
+
+
+        /*
+          If File System Access API
+          wasn't available, result is Blob.
+        */
+
+        if (!currentWriter && result) {
+
+          fallbackBlobs.push({
+
+            part: currentPart,
+
+            blob: result
+
+          });
+
+        }
+
+      }
+
+
+      /*
+        Close input ZIP.
+      */
+
+      await reader.close();
+
+      reader = null;
+
+
+      /*
+        Fallback downloads.
+
+        This branch is mainly for browsers
+        without File System Access API.
+      */
+
+      for (
+        const item of fallbackBlobs
+      ) {
+
+        const url =
+          URL.createObjectURL(
+            item.blob
+          );
+
+
+        const link =
+          document.createElement("a");
+
+
+        link.href = url;
+
+
+        link.download =
+          "unique-pdfs-part-" +
+          String(item.part)
+            .padStart(3, "0") +
+          ".zip";
+
+
+        document.body.appendChild(
+          link
+        );
+
+
+        link.click();
+
+
+        link.remove();
+
+
+        setTimeout(
+          () =>
+            URL.revokeObjectURL(url),
+          60000
+        );
+
+
+        await sleep(1000);
+
+      }
+
+
+      progress.value = 100;
+
+
+      setStatus(
+
+        "DONE ✓\n\n" +
+
+        "Original PDF entries: " +
+        totalPdfEntries.toLocaleString() +
+
+        "\n\nUnique PDFs: " +
+        uniquePdfCount.toLocaleString() +
+
+        "\nDuplicates deleted: " +
+        duplicateCount.toLocaleString() +
+
+        "\n\nOutput ZIPs: " +
+        currentPart.toLocaleString() +
+
+        "\n\nEach ZIP contains maximum " +
+        PDF_PER_ZIP +
+        " PDFs."
+
+      , "success");
+
+
+    }
+
+    catch (error) {
+
+      console.error(error);
+
+
+      if (reader) {
+
+        try {
+
+          await reader.close();
+
+        }
+
+        catch (_) {}
+
+      }
+
+
+      setStatus(
+
+        "ERROR\n\n" +
+
+        (
+          error &&
+          error.message
+            ? error.message
+            : String(error)
+        ) +
+
+        "\n\n" +
+
+        "If a save dialog is open, finish or cancel it and try again."
+
+      , "error");
+
+    }
+
+
+    finally {
+
+      startButton.disabled = false;
+
+    }
+
+  }
+
+);
+
+</script>
+
+</body>
+</html>
